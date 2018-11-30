@@ -1,16 +1,3 @@
-#!/bin/bash
-#-------------------------------------------------------------------------------
-# PURPOSE: List current running jobs fro the V$SESSION_LINGOPS and
-#          RMAN backup information from V$RMAN_BACKUP_JOB_DETAILS
-# AUTHOR : James Schroeter
-# DATE   : 09/02/2018
-#
-#-------------------------------------------------------------------------------
-VERSION="1.0"
-
-
-sqlplus -s '/ as sysdba' <<EOF
-
 SELECT
 	SID,
 	SERIAL#,
@@ -19,7 +6,7 @@ SELECT
 	TOTALWORK, 
 	ROUND (SOFAR/TOTALWORK*100, 2) "% COMPLETE"
 FROM
-	V\$SESSION_LONGOPS
+	V$SESSION_LONGOPS
 WHERE
 	OPNAME LIKE 'RMAN%' AND
 	OPNAME NOT LIKE '%aggregate%' AND
@@ -41,9 +28,8 @@ SELECT
 	to_char(END_TIME,'mm-dd-yyyy hh24:mi:ss') as RMAN_Bkup_end_time,
 	elapsed_seconds/3600 Hours
 FROM
-	V\$RMAN_BACKUP_JOB_DETAILS
+	V$RMAN_BACKUP_JOB_DETAILS
 ORDER BY
 	session_key
 /
 
-EOF
