@@ -1,4 +1,4 @@
-use this sql to find how many archives are getting generated on a database for last 1 year, based on it you can set the flash_recovery_area_size
+/*use this sql to find how many archives are getting generated on a database for last 1 year, based on it you can set the flash_recovery_area_size*/
 
 SELECT A.*,
 Round(A.Count#*B.AVG#/1024/1024) Daily_Avg_Mb
