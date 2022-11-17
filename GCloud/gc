@@ -1,0 +1,311 @@
+#!/bin/bash
+#--------------------------------------------------------------
+# PURPOSE: Run SQL on GCloud or connect
+# AUTHOR : James Schroeter
+# DATE   : 10/01/2022
+#
+# NOTES  : For readability 'set ts=3'
+#          
+# ISSUES : 
+#
+#--------------------------------------------------------------
+VERSION="1.0"
+MONITOR_USER="monitor"
+#USERNAME="jschroeter@battelleecology.org"
+BASENAME=`basename $0`
+
+# host
+P_PDR_HOST="prod-pdr.gcp.neoninternal.org"
+P_PDR_REPLICA_HOST="prod-pdr-replica.gcp.neoninternal.org"
+T_PDR_HOST="test-pdr.gcp.neoninternal.org"
+D_PDR_HOST="dev-pdr.gcp.neoninternal.org"
+I_PDR_HOST="int-pdr.gcp.neoninternal.org"
+I_PDR_REPLICA_HOST="int-pdr-replica.gcp.neoninternal.org"
+C_PDR_HOST="cert-pdr.gcp.neoninternal.org"
+C_PDR_REPLICA_HOST="cert-pdr-replica.gcp.neoninternal.org"
+
+
+GCTOKEN="gcloud auth print-access-token"
+PSQL="psql -P pager=off"
+
+#==============================================================
+# Function USAGE() - Print usage message
+#==============================================================
+USAGE() {
+        echo "
+        USAGE: $BASENAME [ -d Database -a ACTION ] | -h | -v
+
+        -a      Action
+        -d      Database
+        -h      Print usage
+        -v      Version
+
+	Where Action:
+	      a = Activity (pg_stat_activity)
+	      c = Connect (Example: $BASENAME -d d -a c)
+	      l = Display databases and size
+	      m = Display msg and msg_catalog drop commands
+	      M = Display msg and msg_catalog information
+	      n = Display tuple information
+	      s = Display all (Show PostgreSQL Settings)
+	      t = Display tempfiles
+
+	Where Database:
+	      c = c_pdr
+	      C = c_pdr replica
+	      d = d_pdr
+	      i = i_pdr
+	      p = p_pdr
+	      P = p_pdr replica
+	      I = i_pdr Replica
+	      t = t_pdr
+
+        "
+
+	exit 99
+}
+
+
+#==============================================================
+# Function CONNECT() - CONNECT
+#==============================================================
+CONNECT() {
+	# if executing user is DBA else IAM account
+	EXEC_USER=`whoami`
+
+	# Connect or do not connect and just run action
+	if [ "$EXEC_USER" == "dba" ];then
+		$PSQL --host=$HOST --dbname=$DB --username=$MONITOR_USER
+	else
+		PGPASSWORD=$(gcloud auth print-access-token) $PSQL --host=$HOST --dbname=$DB --username=$USERNAME
+	fi
+}
+
+
+#==============================================================
+# Function RUN_SQL() - Run SQL
+#==============================================================
+RUN_SQL() {
+	# if executing user is DBA else IAM account
+	EXEC_USER=`whoami`
+
+	# Connect or do not connect and just run action
+	if [ "$EXEC_USER" == "dba" ];then
+		$PSQL --host=$HOST --dbname=$DB --username=$MONITOR_USER -c "$SQL"
+	else
+		PGPASSWORD=$(gcloud auth print-access-token) $PSQL --host=$HOST --dbname=$DB --username=$USERNAME -c "$SQL"
+	fi
+}
+
+
+#==============================================================
+# Function MSG_PARTITIONS() - List table and partitions for 
+#                             msg and msg_catalog
+#==============================================================
+MSG_PARTITIONS() {
+	echo -e "\n\tMSG Partitions for database \"$DB\" on host $HOST\n\n"
+	SQL="SELECT
+		pt.relname as partition_name,
+	        pg_get_expr(pt.relpartbound, pt.oid, true) as partition_expression
+	FROM
+		pg_class base_tb
+	        join pg_inherits i on i.inhparent = base_tb.oid
+	        join pg_class pt on pt.oid = i.inhrelid
+	WHERE
+	        base_tb.oid = 'pdr.msg'::regclass
+	ORDER by 2;
+	"
+	RUN_SQL
+
+	echo -e "\n\tMSG_CATALOG  Partitions for database \"$DB\" on host $HOST\n\n"
+	SQL="SELECT
+		pt.relname as partition_name,
+		pg_get_expr(pt.relpartbound, pt.oid, true) as partition_expression
+	FROM
+		pg_class base_tb
+		join pg_inherits i on i.inhparent = base_tb.oid
+		join pg_class pt on pt.oid = i.inhrelid
+	WHERE
+		base_tb.oid = 'pdr.msg_catalog'::regclass
+	ORDER BY 2
+	"
+	RUN_SQL
+}
+
+#==============================================================
+# Function DROP_MSG_PARTITIONS() - List partion drop commands
+#                                  for msg and msg_catalog
+#==============================================================
+DROP_MSG_PARTITIONS() {
+
+	# How many partitions to keep
+	KEEP_DAYS=11
+	TABLES="msg msg_catalog"
+
+	# Get DATE from 45 days ago and convert to seconds, DO NOT DELETE FIRST PARTITION - DEFAULT
+	CUTOFF_DATE=`date -d "now - $KEEP_DAYS days" +%Y-%m-%d`
+	CUTOFF_DATE_SEC=`date -d "$CUTOFF_DATE" +%s`
+
+	# Get skip data - If partitions are old
+	SKIP_DATE=`date -d "now - 90 days" +%Y-%m-%d`
+	SKIP_DATE_SEC=`date -d "$SKIP_DATE" +%s`
+
+	for table in $TABLES;do
+		echo -e "\n  DROP $table Partitions database: $DB on host $HOST\n"
+		echo -e "  Delete files older than: $CUTOFF_DATE - $CUTOFF_DATE_SEC"
+		echo -e "  Skip files older than  : $SKIP_DATE - $SKIP_DATE_SEC\n"
+		DATES=`MSG_PARTITIONS $DB $HOST | grep -v ^$ | grep "[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9] 00:00:00" | awk '{print $1":"$6}' | grep ${table}_p | sed "s/('//" | sort`
+
+		for ROW in $DATES;do
+			PART_DATE=`echo $ROW | awk -F":" '{print $2}'`
+			PART_DATE_SEC=$(date -d "$PART_DATE" +%s)
+	
+			if (( $DEBUG )) ;then
+				echo -e "$PART_DATE \c"
+				echo -e "$PART_DATE_SEC \c"
+				echo -e "$CUTOFF_DATE $CUTOFF_DATE_SEC"
+			fi
+
+			if [ $PART_DATE_SEC -le $CUTOFF_DATE_SEC -a $PART_DATE_SEC -gt $SKIP_DATE_SEC ];then
+				if (( $DEBUG ));then
+					echo -e "$PART_DATE \c"
+					echo -e "$PART_DATE_SEC \c"
+					echo -e "$CUTOFF_DATE $CUTOFF_DATE_SEC \c"
+					echo "DELETE"
+				fi
+
+				PARTITION=`echo $ROW | awk -F":" '{print $1}'`
+				echo "DROP TABLE $PARTITION;"
+				# Sleep 5 seconds between deletes because of locks
+				echo "SELECT pg_sleep(5);"
+			fi
+		done
+	done
+}
+
+#==============================================================
+# Function ACTIVITY() - pg_stat_activity
+# PGPASSWORD=$(gcloud auth print-access-token) psql --dbname=i_pdr --username=jschroeter@battelleecology.org --host=int-pdr.gcp.neoninternal.org -c
+#==============================================================
+PG_ACTIVITY() {
+	echo -e "\n\tActivity for database \"$DB\" on host $HOST\n\n"
+	SQL="SELECT
+        	datname,
+	        usename,
+	        application_name,
+	        query_start::timestamp(0),
+	        client_addr,
+	        state,
+        	backend_type
+	FROM
+        	pg_stat_activity
+	"
+	RUN_SQL
+}
+
+
+#==============================================================
+# Function INSTANCE_INFO() - "\l+"
+#==============================================================
+INSTANCE_INFO() {
+	echo -e "\n\tInstance Info for database \"$DB\" on host $HOST\n\n"
+	SQL="\l+"
+	RUN_SQL
+}
+
+
+#==============================================================
+# Function NTUPLES() - Show tuple information
+#==============================================================
+NTUPLES() {
+	echo -e "\n\tntuple Info for database \"$DB\" on host $HOST\n\n"
+	SQL="SELECT
+		schemaname,
+		relname,
+		n_live_tup,
+		n_tup_ins,
+		n_tup_upd,
+		n_tup_del,
+		n_tup_hot_upd,
+		n_dead_tup,
+		n_mod_since_analyze
+	FROM
+		pg_stat_user_tables
+		ORDER BY relname
+	"
+	RUN_SQL
+}
+
+
+#==============================================================
+# Function SHOWALL() - show all
+#==============================================================
+SHOWALL() {
+	echo -e "\n\tSHOW ALL for database \"$DB\" on host $HOST\n\n"
+	SQL="SHOW ALL"
+	RUN_SQL
+}
+
+
+#==============================================================
+# Function TEMPFILES() - Display number of tempfiles
+#==============================================================
+TEMPFILES() {
+	echo -e "\n\tTempfiles for  database \"$DB\" on host $HOST\n\n"
+	SQL="SELECT
+		datname,
+		tup_returned,
+		tup_fetched,
+		tup_inserted,
+		tup_deleted,
+		temp_files,
+		temp_bytes,
+		stats_reset::timestamp(0)
+	FROM
+		pg_stat_database
+	ORDER BY
+		temp_files
+	"
+	RUN_SQL
+}
+
+#==============================================================
+# Main Starts Here
+#==============================================================
+if [ $# -eq 0 ];then
+	USAGE
+fi
+
+while getopts a:d:hv opt ;do
+	case $opt in
+		# d ) VAR1="$OPTARG"; VAR2="VALUE";;
+		a ) ACTION="$OPTARG";;
+		d ) DB="$OPTARG";;
+		v ) echo "VERSION=$VERSION";;
+		h ) USAGE ; LOGD "exit 98" eixt 98;;
+		\? ) USAGE ; LOGD "exit 97" eixt 97;;
+	esac
+done
+
+case $DB in
+	d ) DB="d_pdr"; HOST=$D_PDR_HOST;;
+	i ) DB="i_pdr"; HOST=$I_PDR_HOST;;
+	I ) DB="i_pdr"; HOST=$I_PDR_REPLICA_HOST;;
+	c ) DB="c_pdr"; HOST=$C_PDR_HOST;;
+	C ) DB="c_pdr"; HOST=$C_PDR_REPLICA_HOST;;
+	t ) DB="t_pdr"; HOST=$T_PDR_HOST;;
+	p ) DB="p_pdr"; HOST=$P_PDR_HOST;;
+	P ) DB="p_pdr"; HOST=$P_PDR_REPLICA_HOST;;
+esac
+
+# Run function based on ACTION (OPTARG)
+case $ACTION in
+	a ) PG_ACTIVITY;;
+	c ) CONNECT;;
+	l ) INSTANCE_INFO;;
+	m ) DROP_MSG_PARTITIONS;;
+	M ) MSG_PARTITIONS;;
+	n ) NTUPLES;;
+	s ) SHOWALL;;
+	t ) TEMPFILES;;
+esac
